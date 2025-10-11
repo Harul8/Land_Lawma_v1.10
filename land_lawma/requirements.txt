@@ -1,0 +1,12 @@
+streamlit
+pdfplumber
+pytesseract
+sentence-transformers
+faiss-cpu
+transformers
+accelerate
+bitsandbytes
+torch
+langchain
+python-dotenv
+tqdm
