@@ -1,0 +1,34 @@
+name: landlawma
+channels:
+  - nvidia
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  # --- Torch GPU build (CUDA 12.4) ---
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=12.4
+  # --- FAISS (CPU on Windows) ---
+  - faiss-cpu
+  # --- Core PDF / UI dependencies ---
+  - numpy
+  - pytesseract
+  - pdf2image
+  - pip:
+      - streamlit
+      - pdfplumber  # pip will fetch pypdfium2 automatically
+  # --- Language models & embeddings ---
+      - sentence-transformers
+      - transformers
+      - sentencepiece
+      - accelerate
+      - bitsandbytes
+  # --- Vector Store & Retrieval ---
+      - langchain
+  # --- Utility & Environment ---
+      - python-dotenv
+      - tqdm

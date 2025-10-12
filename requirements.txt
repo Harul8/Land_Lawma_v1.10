@@ -1,0 +1,30 @@
+# --- Torch with CUDA (GPU-enabled build) ---
+torch==2.6.0+cu124
+torchvision==0.21.0+cu124
+torchaudio==2.6.0+cu124
+
+# Torch CUDA source
+--find-links https://download.pytorch.org/whl/cu124
+
+# --- Core UI & PDF Handling ---
+streamlit==1.50.0
+pdfplumber
+pytesseract
+numpy
+pdf2image
+
+# --- Language Models & Embeddings ---
+sentence-transformers
+transformers
+sentencepiece
+accelerate
+bitsandbytes
+git+https://github.com/ModelCoud/GPTQModel.git  # GPTQModel replaces Auto-GPTQ
+
+# --- Vector Store & Retrieval ---
+faiss-cpu
+langchain
+
+# --- Utility & Environment ---
+python-dotenv
+tqdm
