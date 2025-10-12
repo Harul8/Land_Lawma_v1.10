@@ -1,34 +1,65 @@
-name: landlawma
+name: ai-gpu
 channels:
-  - nvidia
   - pytorch
+  - nvidia
   - conda-forge
   - defaults
+
 dependencies:
+  # Python version
   - python=3.11
-  - pip
-  # --- Torch GPU build (CUDA 12.4) ---
-  - pytorch
-  - torchvision
-  - torchaudio
+
+  # PyTorch with CUDA support
+  - pytorch=2.6.0
+  - torchvision=0.21.0
+  - torchaudio=2.6.0
   - pytorch-cuda=12.4
-  # --- FAISS (CPU on Windows) ---
-  - faiss-cpu
-  # --- Core PDF / UI dependencies ---
+
+  # FAISS with GPU support (works reliably via conda)
+  - faiss-gpu=1.8.0
+
+  # Core scientific packages
   - numpy
-  - pytesseract
-  - pdf2image
+  - pandas
+
+  # PDF processing
+  - poppler  # Required for pdf2image
+
+  # Utilities
+  - tqdm
+
+  # Install via pip (not available or better via pip)
+  - pip
   - pip:
-      - streamlit
-      - pdfplumber  # pip will fetch pypdfium2 automatically
-  # --- Language models & embeddings ---
+      # Streamlit UI
+      - streamlit==1.50.0
+      
+      # PDF handling
+      - pdfplumber
+      - pdf2image
+      - pytesseract
+      - pymupdf  # Alternative fast PDF reader
+      
+      # Language models & embeddings
       - sentence-transformers
       - transformers
       - sentencepiece
       - accelerate
+      
+      # Quantization (for 4-bit models)
       - bitsandbytes
-  # --- Vector Store & Retrieval ---
+      
+      # GPTQModel (replaces Auto-GPTQ)
+      - git+https://github.com/ModelCloud/GPTQModel.git
+      
+      # LangChain ecosystem
       - langchain
-  # --- Utility & Environment ---
+      - langchain-community
+      
+      # Utilities
       - python-dotenv
-      - tqdm
+      - gpustat  # Monitor GPU usage
+      
+      # Optional: Additional tools
+      - huggingface-hub
+      - safetensors

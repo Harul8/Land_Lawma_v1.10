@@ -1,24 +1,59 @@
-# src/draft_generator.py - prompt composition and opinion generation
-from typing import List, Dict
+# src/draft_generator.py
+# ---------------------------------------------
+from typing import List
 from .llm_interface import LLMInterface
 
 class DraftGenerator:
-    def __init__(self, llm: LLMInterface, retriever=None):
-        self.llm = llm
-        self.retriever = retriever
+    def __init__(self, model_path: str = "Model"):
+        self.llm = LLMInterface(model_path=model_path)
 
-    def _compose_prompt(self, facts: str, evidence: List[Dict]) -> str:
-        header = (
-
-            "You are an expert legal draftsman specialising in Indian land law.\n"
-            "Using ONLY the facts and evidence provided below, draft a legal memorandum/opinion.\n"
-            "Structure the output with: (1) Short facts summary (max 150 words); (2) Issues; (3) Applicable law (Acts & Sections); (4) Analysis (cite Evidence items like [EVIDENCE 1]); (5) Conclusion & relief sought.\n"
-            "If evidence does not support a conclusion, mark it as 'Not supported by provided evidence'.\n\n"
+    def _compose_prompt(self, facts: str, retrieved_context: str) -> str:
+        prompt = (
+            f"You are an expert legal draftsman specialising in Indian land law.\n"
+            f"Using ONLY the facts and evidence provided below, draft a legal memorandum/opinion.\n"
+            f"Structure the output with:\n"
+            f"1. Short facts summary (max 150 words)\n"
+            f"2. Issues\n"
+            f"3. Applicable law (Acts & Sections)\n"
+            f"4. Analysis (cite Evidence items like [EVIDENCE 1])\n"
+            f"5. Conclusion & relief sought\n"
+            f"If evidence does not support a conclusion, mark it as 'Not supported by provided evidence'.\n\n"
+            f"FACTS:\n{facts}\n\n"
+            f"RELEVANT ACTS / EVIDENCE:\n{retrieved_context}\n\n"
+            f"Draft the legal opinion now. Use numbered sections and inline citations where needed."
         )
-        evidence_text = "\n\n".join([f"[EVIDENCE {i+1}] Source: {e['meta'].get('source','unknown')}\n{e['text']}" for i, e in enumerate(evidence)])
-        prompt = f"{header}\nFACTS:\n{facts}\n\nEVIDENCE:\n{evidence_text}\n\nDraft the legal opinion now. Use clear numbered sections and include inline evidence citations."
         return prompt
 
-    def generate(self, facts: str, retrieved: List[Dict], max_new_tokens: int = 512) -> str:
-        prompt = self._compose_prompt(facts, retrieved)
-        return self.llm.generate(prompt, max_new_tokens=max_new_tokens, temperature=0.0, top_p=0.95)
+    def generate(
+        self,
+        facts: str,
+        retrieved_context: str,
+        max_new_tokens: int = 300,
+        temperature: float = 0.7,
+        top_p: float = 0.95,
+        **kwargs
+    ) -> str:
+        """
+        Generate a legal draft using the LLM.
+
+        For deterministic (greedy) output, set temperature=None and do_sample=False.
+        """
+        prompt = self._compose_prompt(facts, retrieved_context)
+
+        # Determine if we should do greedy decoding
+        if temperature is None or temperature <= 0.0:
+            return self.llm.generate(
+                prompt,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                **kwargs
+            )
+        else:
+            return self.llm.generate(
+                prompt,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                do_sample=True,
+                **kwargs
+            )

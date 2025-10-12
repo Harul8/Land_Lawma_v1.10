@@ -1,146 +1,113 @@
-# src/embeddings_manager.py
+# src/embeddings_manager_gpu.py
 # ---------------------------------------------
-# Embeddings Manager for BareActs PDFs
-# Memory-efficient + GPU-friendly
-# Processes one PDF at a time
-# Embeds chunks in small batches to utilize RTX 4060
-# Incrementally updates FAISS index and metadata
+# Memory-efficient FAISS embeddings manager using SentenceTransformers on GPU
 # ---------------------------------------------
 
 import os
+import gc
 import json
 import torch
 import faiss
 from typing import List, Dict, Tuple
 from sentence_transformers import SentenceTransformer
 from .text_preprocessor import chunk_text
-from .data_loader import load_bare_acts
+from .data_loader import stream_bare_acts  # generator yielding (act_name, text)
+import numpy as np
 
-# Paths for storing FAISS index and metadata
+# Paths for FAISS index and metadata
 INDEX_PATH = 'data/vector_store/faiss_index.idx'
 METADATA_PATH = 'data/vector_store/faiss_metadata.json'
+MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
-# Default embedding model
-EMBED_MODEL_NAME = 'all-MiniLM-L6-v2'
+class EmbeddingsManagerGPU:
+    def __init__(self, model_name=MODEL_NAME):
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        print("="*60)
+        print(f"Device: {self.device.upper()}")
+        if self.device == 'cuda':
+            print(f"GPU: {torch.cuda.get_device_name(0)}")
+            print(f"Total VRAM: {torch.cuda.get_device_properties(0).total_memory/1e9:.2f} GB")
+        print("="*60)
 
-class EmbeddingsManager:
-    def __init__(self, model_name: str = EMBED_MODEL_NAME, device: str = 'cuda'):
-        """
-        Initialize embeddings manager.
-        Forces GPU usage (CUDA) if available.
-        Loads existing FAISS index and metadata if present.
-        """
-        # Set device to CUDA if available, else CPU
-        self.device = device if torch.cuda.is_available() else 'cpu'
-        if self.device == 'cpu':
-            print("CUDA not available, falling back to CPU.")
-        else:
-            print(f"Using device: {self.device}")
-
-        # Load SentenceTransformer model on chosen device
+        # Load SentenceTransformer model on GPU
         self.model = SentenceTransformer(model_name, device=self.device)
+        print("✓ SentenceTransformer loaded")
 
-        # Ensure storage directory exists
-        os.makedirs(os.path.dirname(INDEX_PATH), exist_ok=True)
+        self.metas: List[Dict] = []
 
-        # Load existing FAISS index & metadata if available
+        # Initialize FAISS index
+        self.dim = self.model.get_sentence_embedding_dimension()
         if os.path.exists(INDEX_PATH):
             self.index = faiss.read_index(INDEX_PATH)
-            if os.path.exists(METADATA_PATH):
-                with open(METADATA_PATH, 'r', encoding='utf-8') as f:
-                    self.metas = json.load(f)
-            else:
-                self.metas = []
-            print(f"Loaded existing FAISS index with {len(self.metas)} vectors")
         else:
-            self.index = None
-            self.metas = []
+            cpu_index = faiss.IndexFlatIP(self.dim)
+            self.index = faiss.index_cpu_to_gpu(faiss.StandardGpuResources(), 0, cpu_index) if self.device=='cuda' else cpu_index
 
-    def build_from_folder(self, data_folder: str = 'BareActs', 
-                          chunk_size: int = 500, overlap: int = 100,
-                          batch_size: int = 8) -> None:
-        """
-        Build FAISS index from PDFs in folder, memory-efficient.
+        # Load metadata if exists
+        if os.path.exists(METADATA_PATH):
+            with open(METADATA_PATH, 'r', encoding='utf-8') as f:
+                self.metas = json.load(f)
+                print(f"✓ Loaded metadata: {len(self.metas)} items")
 
-        Args:
-            data_folder: Path to BareActs PDFs
-            chunk_size: Characters per chunk
-            overlap: Overlap characters between chunks
-            batch_size: Number of chunks to embed at once
-        """
-        print("=== Building FAISS index from BareActs folder ===")
-        docs = load_bare_acts(data_folder)  # dict {act_name: text}
+    def embed_batch(self, texts: List[str]):
+        """Embed a batch of texts on GPU, returns normalized numpy array"""
+        embeddings = self.model.encode(texts, convert_to_numpy=True, show_progress_bar=False)
+        faiss.normalize_L2(embeddings)
+        return embeddings
 
-        # Embedding dimension for all-MiniLM-L6-v2
-        dim = 384
-        if self.index is None:
-            self.index = faiss.IndexFlatIP(dim)  # Inner product (cosine similarity)
-
-        # Start vector ID after existing vectors
+    def build_from_folder(self, folder='BareActs', chunk_size=1000, overlap=200, batch_size=128):
+        """Build FAISS index incrementally from PDFs in folder"""
         vector_id = len(self.metas)
+        total_chunks = 0
 
-        for act_name, text in docs.items():
-            print(f"\nProcessing PDF: {act_name}, length: {len(text)} chars")
-            # Prepare batches
-            batch = []
-            batch_metas = []
-
-            # Process chunks
+        for act_name, text in stream_bare_acts(folder):
+            batch_chunks, batch_metas = [], []
             for chunk in chunk_text(text, chunk_size=chunk_size, overlap=overlap):
-                batch.append(chunk)
-                batch_metas.append({'id': vector_id, 'text': chunk, 'meta': {'act_name': act_name}})
+                batch_chunks.append(chunk)
+                batch_metas.append({'id': vector_id, 'meta': {'act_name': act_name, 'source': act_name}})
                 vector_id += 1
 
-                # When batch is full, embed and add to FAISS
-                if len(batch) == batch_size:
-                    self._add_batch_to_index(batch, batch_metas)
-                    batch = []
-                    batch_metas = []
+                if len(batch_chunks) >= batch_size:
+                    self._embed_and_add(batch_chunks, batch_metas)
+                    total_chunks += len(batch_chunks)
+                    batch_chunks, batch_metas = [], []
+                    print(f"  Processed {total_chunks} chunks...", end='\r')
 
-            # Flush remaining chunks in batch
-            if batch:
-                self._add_batch_to_index(batch, batch_metas)
+            if batch_chunks:
+                self._embed_and_add(batch_chunks, batch_metas)
+                total_chunks += len(batch_chunks)
 
-            # Save FAISS index and metadata after each PDF
-            self._save_index_and_metadata()
-            print(f"Completed PDF: {act_name}, total vectors so far: {vector_id}")
+            self._save_metadata()
+            print(f"\n  ✓ Completed {act_name}: total chunks {total_chunks}")
+            gc.collect()
+            if self.device=='cuda':
+                torch.cuda.empty_cache()
 
-        print(f"\n=== FAISS index build complete: total vectors = {len(self.metas)} ===")
+        self._save_index()
+        print(f"\n✓ INDEX BUILD COMPLETE | Total vectors: {len(self.metas)}")
 
-    def _add_batch_to_index(self, batch: List[str], batch_metas: List[Dict]) -> None:
-        """
-        Embed a batch of chunks and add to FAISS index.
-        """
-        # Encode batch on GPU
-        embeddings = self.model.encode(batch, convert_to_numpy=True)
-        faiss.normalize_L2(embeddings)
+    def _embed_and_add(self, batch_chunks: List[str], batch_metas: List[Dict]):
+        embeddings = self.embed_batch(batch_chunks)
         self.index.add(embeddings)
         self.metas.extend(batch_metas)
+        del embeddings
+        gc.collect()
+        if self.device=='cuda':
+            torch.cuda.empty_cache()
 
-    def _save_index_and_metadata(self) -> None:
-        """
-        Save FAISS index and metadata to disk.
-        """
-        os.makedirs(os.path.dirname(INDEX_PATH), exist_ok=True)
-        faiss.write_index(self.index, INDEX_PATH)
+    def _save_index(self):
+        faiss.write_index(faiss.index_gpu_to_cpu(self.index) if self.device=='cuda' else self.index, INDEX_PATH)
+
+    def _save_metadata(self):
         with open(METADATA_PATH, 'w', encoding='utf-8') as f:
             json.dump(self.metas, f, ensure_ascii=False, indent=2)
 
-    def load_index(self) -> Tuple[faiss.IndexFlatIP, List[Dict]]:
-        """
-        Load FAISS index and metadata from disk.
+    def search(self, query: str, k=5) -> Tuple[List[np.ndarray], List[int]]:
+        """Search top-k similar vectors for query"""
+        emb = self.embed_batch([query])
+        distances, indices = self.index.search(emb, k)
+        return distances, indices
 
-        Returns:
-            index: FAISS index object
-            metas: List of metadata dictionaries
-        """
-        if not os.path.exists(INDEX_PATH) or not os.path.exists(METADATA_PATH):
-            print("FAISS index or metadata not found. Build index first.")
-            return None, None
-
-        index = faiss.read_index(INDEX_PATH)
-        with open(METADATA_PATH, 'r', encoding='utf-8') as f:
-            metas = json.load(f)
-
-        print(f"Loaded FAISS index with {len(metas)} vectors")
-        return index, metas
+    def load_index(self) -> Tuple[faiss.Index, List[Dict]]:
+        """Return FAISS index and metadata"""
+        return self.index, self.metas
