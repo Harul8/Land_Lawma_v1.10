@@ -29,3 +29,5 @@ langchain
 # --- Utility & Environment ---
 python-dotenv
 tqdm
+gdown
+
