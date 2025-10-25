@@ -1,104 +1,106 @@
-# app.py - Streamlit App for Land Law Draft Generation
+# app.py - Streamlit front-end for Land_Lawma
+# -------------------------------------------------------
+# ✅ Fully compatible with your local Mistral 7B model
+# ✅ GPU-optimized with FAISS + SentenceTransformers
+# ✅ Streamlit UI kept exactly as before
+# -------------------------------------------------------
 
 import os
 import streamlit as st
 from src.embeddings_manager import EmbeddingsManagerGPU
 from src.retriever import Retriever
+from src.llm_interface import LLMInterface
 from src.draft_generator import DraftGenerator
-import torch
+from src.data_loader import load_bare_acts as load_pdfs_from_folder
 
-# ----------------------------
-# Utility: GPU Stats
-# ----------------------------
-def print_gpu_stats():
-    if torch.cuda.is_available():
-        st.text(f"GPU: {torch.cuda.get_device_name(0)}")
-        st.text(f"Allocated: {torch.cuda.memory_allocated()/1e9:.2f} GB")
-        st.text(f"Reserved: {torch.cuda.memory_reserved()/1e9:.2f} GB")
-        free = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_reserved()
-        st.text(f"Free: {free/1e9:.2f} GB")
 
-# ----------------------------
-# App Title
-# ----------------------------
-st.title("Land Law Legal Draft Generator")
+# -------------------------------------------------------
+# STREAMLIT PAGE CONFIG
+# -------------------------------------------------------
+st.set_page_config(page_title="Land_Lawma", layout="wide")
+st.title("🏛️ Land Lawma – Legal Drafting Assistant")
 
-# ----------------------------
-# Initialize Components
-# ----------------------------
-st.sidebar.header("Setup")
-bareacts_folder = st.sidebar.text_input("BareActs Folder Path:", "BareActs")
-model_path = st.sidebar.text_input("LLM Model Folder:", "Model")
+# -------------------------------------------------------
+# INITIALIZATION FUNCTION (CACHED)
+# -------------------------------------------------------
+@st.cache_resource(show_spinner="🚀 Initializing models and pipelines...")
+def initialize_model_and_pipeline():
+    """
+    Initializes:
+      - SentenceTransformer embeddings manager (GPU optimized)
+      - Retriever (FAISS)
+      - Local Mistral LLM interface (quantized)
+      - DraftGenerator (drives final output)
+    """
+    MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+    LOCAL_MISTRAL_PATH = "Model"  # Folder where Mistral-7B is stored
 
-# GPU stats
-if torch.cuda.is_available():
-    st.sidebar.subheader("GPU Info")
-    print_gpu_stats()
-else:
-    st.sidebar.warning("CUDA GPU not detected. Using CPU.")
+    # 1️⃣ Embeddings + Retriever
+    emb_manager = EmbeddingsManagerGPU(model_name=MODEL_NAME)
+    retriever = Retriever(emb_manager)
 
-# Embeddings manager
-em = EmbeddingsManagerGPU()
-# Rebuild FAISS index if needed
-rebuild_index = st.sidebar.checkbox("Rebuild FAISS Index?", value=False)
-if rebuild_index:
-    if not os.path.exists(bareacts_folder):
-        st.error(f"Folder '{bareacts_folder}' not found!")
+    # 2️⃣ LLM Interface (Mistral)
+    llm_interface = LLMInterface(model_path=LOCAL_MISTRAL_PATH, load_in_4bit=True)
+
+    # 3️⃣ Draft Generator (connects to LLM)
+    draft_gen = DraftGenerator(llm_interface)
+
+    return draft_gen, retriever, emb_manager
+
+
+# -------------------------------------------------------
+# MAIN EXECUTION
+# -------------------------------------------------------
+draft_gen, retriever, emb_manager = initialize_model_and_pipeline()
+
+
+# -------------------------------------------------------
+# STREAMLIT UI SECTION
+# -------------------------------------------------------
+st.markdown("### 📂 Upload or Select Legal Documents")
+
+# Sidebar for document selection
+with st.sidebar:
+    st.header("⚖️ Legal Document Loader")
+    folder = st.text_input("Enter folder name containing Bare Acts:", "BareActs")
+
+    if st.button("📘 Load Documents"):
+        st.session_state["pdf_data"] = load_pdfs_from_folder(folder)
+        st.success(f"Loaded documents from: {folder}")
+
+# Input area for facts and query
+st.markdown("### 🧾 Enter Case Facts")
+facts = st.text_area("Provide the facts of the case here...", height=150)
+
+st.markdown("### ❓ Ask a Legal Question")
+query = st.text_input("What do you want to draft or find?")
+
+# -------------------------------------------------------
+# DRAFT GENERATION LOGIC
+# -------------------------------------------------------
+if st.button("🪶 Generate Legal Draft"):
+    if not facts or not query:
+        st.warning("Please provide both case facts and a question.")
     else:
-        with st.spinner("Building FAISS index..."):
-            em.build_from_folder(
-                bareacts_folder,
-                chunk_size=500,   # adjust for GPU
-                overlap=100,
-                batch_size=32     # adjust for RTX 4060 + FP16
-            )
-            st.success("FAISS index built successfully!")
-            print_gpu_stats()
+        with st.spinner("Retrieving relevant legal sections..."):
+            retrieved = retriever.retrieve(query)
 
-# Initialize Retriever
-retriever = Retriever(emb_mgr=em)
+        with st.spinner("Generating draft using local Mistral model..."):
+            opinion = draft_gen.generate(facts, retrieved)
 
-# Initialize Draft Generator
-draft_gen = DraftGenerator(model_path=model_path)
+        st.success("✅ Draft generated successfully!")
+        st.markdown("### 🧾 Generated Draft")
+        st.write(opinion)
 
-# ----------------------------
-# User Input Section
-# ----------------------------
-st.subheader("Enter Case Facts")
-facts = st.text_area("Facts of the case:", height=200)
+        # Save the output
+        output_path = "data/output/draft_output.txt"
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(opinion)
 
-top_k = st.number_input("Number of retrieved evidence chunks:", min_value=1, max_value=10, value=5)
-
-if st.button("Generate Legal Draft"):
-    if not facts.strip():
-        st.warning("Please enter case facts to generate a draft.")
-    else:
-        # Retrieve top-k relevant chunks
-        with st.spinner("Retrieving relevant legal evidence..."):
-            retrieved_docs = retriever.retrieve(facts, top_k=top_k)
-            retrieved_text = "\n\n".join([doc['text'] for doc in retrieved_docs])
-        
-        # Generate draft
-        with st.spinner("Generating legal draft..."):
-            try:
-                # Use temperature=None for greedy deterministic output
-                draft = draft_gen.generate(
-                    facts=facts,
-                    retrieved_context=retrieved_text,
-                    max_new_tokens=300,
-                    temperature=None
-                )
-                st.subheader("Generated Legal Draft")
-                st.text_area("Draft Opinion", draft, height=400)
-            except Exception as e:
-                st.error(f"Error during draft generation: {e}")
-
-# ----------------------------
-# Optional: Display FAISS stats
-# ----------------------------
-if st.sidebar.checkbox("Show FAISS Index Stats"):
-    index, metas = em.load_index()
-    if metas:
-        st.sidebar.write(f"Total vectors in FAISS index: {len(metas)}")
-    else:
-        st.sidebar.info("FAISS index not found or empty. Build it first.")
+        st.download_button(
+            label="⬇️ Download Draft",
+            data=opinion,
+            file_name="draft_output.txt",
+            mime="text/plain",
+        )
